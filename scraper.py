@@ -37,8 +37,8 @@ def send_telegram(text):
 
 
 def extract_wage(text):
-    """Извлекает ставку в $/час или годовую зарплату даже из табличных колонок."""
-    # 1. Почасовая со словами per hour / hr / hourly: $27.98 per hour
+    """Точный поиск почасовой ставки ($XX.XX/hr) или годового оклада."""
+    # 1. Почасовая со словами per hour / hr / hourly
     hourly_explicit = re.search(
         r"(\$\s*\d{2}(?:\.\d{2})?\s*(?:per\s*hour|\/\s*hr|hourly))",
         text,
@@ -58,7 +58,7 @@ def extract_wage(text):
     ):
         return hourly_range.group(1).strip()
 
-    # 3. Поиск по строке заголовка Wage/Salary
+    # 3. Строка с маркером Wage/Rate/Salary
     table_wage = re.search(
         r"(?:wage|rate|salary)[^\$\n\r]{0,30}(\$\s*\d{2,3}(?:\.\d{2}|,\d{3})?(?:\s*(?:-|to)\s*\$?\s*\d{2,3}(?:\.\d{2}|,\d{3})?)?)",
         text,
@@ -69,7 +69,7 @@ def extract_wage(text):
         if len(val) > 2 and not val.endswith("."):
             return f"{val}/hr" if "." in val else val
 
-    # 4. Годовой оклад: $86,312 to $109,614
+    # 4. Годовой оклад
     salary_annual = re.search(
         r"(\$\s*\d{2,3},\d{3}\s*(?:-|to)\s*\$?\s*\d{2,3},\d{3})", text
     )
@@ -80,8 +80,7 @@ def extract_wage(text):
 
 
 def clean_meaningful_text(text, max_len=360):
-    """Полностью срезает любые вариации рекламного туристского текста SCRD."""
-    # Жесткий срез всех вариантов промо-текстов региона
+    """Срезает рекламные преамбулы и находит фактическое описание должности."""
     patterns_to_remove = [
         r"The Sunshine Coast.*?Hike the trails.*?(attend|cross - country skiing|culture)[,\.]?",
         r"The Sunshine Coast A natural paradise.*?Skwxw[uú]7mesh.*?Nations?[,\.]?",
@@ -91,7 +90,6 @@ def clean_meaningful_text(text, max_len=360):
     for pattern in patterns_to_remove:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.DOTALL)
 
-    # Принудительно стартуем с маркеров обязанностей/описания роли
     markers = [
         "The Opportunity",
         "Position Overview",
@@ -114,6 +112,7 @@ def clean_meaningful_text(text, max_len=360):
 
 
 def extract_pdf_snippet(pdf_url):
+    """Скачивает PDF и извлекает проверенный сниппет с зарплатой."""
     try:
         r = requests.get(pdf_url, headers=HEADERS, timeout=12)
         if r.status_code == 200:
@@ -125,11 +124,16 @@ def extract_pdf_snippet(pdf_url):
             wage = extract_wage(full_text)
             body = clean_meaningful_text(full_text)
 
+            # Проверка: если в тексте нет признаков реальной вакансии — возвращаем None
+            job_keywords = ["duties", "qualifications", "experience", "hourly", "wage", "salary", "hours of work", "apply"]
+            if not any(k in full_text.lower() for k in job_keywords):
+                return None
+
             wage_line = f"💰 <b>Ставка:</b> {wage}\n\n" if wage else ""
             return f"{wage_line}{body}"
     except Exception:
         pass
-    return "📄 <i>Подробности и требования указаны в прикрепленном документе.</i>"
+    return None
 
 
 def load_seen():
@@ -148,7 +152,6 @@ def save_seen(seen):
 
 
 def notify_job(source, title, link, description, seen, new_seen):
-    # Очищаем заголовки от лишних знаков
     clean_title = re.sub(r"\s+", " ", title).strip()
     job_id = f"{source}::{clean_title}::{link}"
     if job_id in seen:
@@ -165,7 +168,7 @@ def notify_job(source, title, link, description, seen, new_seen):
 
 
 def parse_scrd(seen, new_seen):
-    """Сбор открытых позиций SCRD."""
+    """Парсер вакансий SCRD с прикрепленными PDF."""
     url = "https://www.scrd.ca/careers/"
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -187,6 +190,7 @@ def parse_scrd(seen, new_seen):
                         "Assistant",
                         "Driver",
                         "Tech",
+                        "Attendant",
                     ]
                 )
             ):
@@ -196,13 +200,14 @@ def parse_scrd(seen, new_seen):
             if link_tag:
                 pdf_link = urllib.parse.urljoin(url, link_tag.get("href"))
                 snippet = extract_pdf_snippet(pdf_link)
-                notify_job("SCRD", title, pdf_link, snippet, seen, new_seen)
+                if snippet:
+                    notify_job("SCRD", title, pdf_link, snippet, seen, new_seen)
     except Exception as e:
         print(f"Ошибка SCRD: {e}")
 
 
 def parse_gibsons(seen, new_seen):
-    """Сбор вакансий Town of Gibsons по всем доступным ссылкам и кнопкам."""
+    """Строгий парсер Town of Gibsons: только блок вакансий и валидные PDF."""
     url = "https://gibsons.ca/town-hall/employment-opportunities/"
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -210,45 +215,43 @@ def parse_gibsons(seen, new_seen):
             return
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Ищем все ссылки на PDF или внутренние страницы вакансий
-        for a in soup.select("a[href*='.pdf'], .entry-content a, main a"):
+        curr_opps_header = soup.find(
+            lambda tag: tag.name in ["h2", "h3", "h4"]
+            and "current opportunit" in tag.get_text().lower()
+        )
+        container = curr_opps_header.parent if curr_opps_header else soup
+
+        for a in container.find_all("a", href=True):
+            href = a.get("href", "").strip()
             title = a.get_text(strip=True)
-            href = a.get("href", "")
-            if not href or len(title) < 5:
-                continue
-
-            # Отсекаем мусор и навигацию сайта
-            if any(
-                w in title.lower()
-                for w in [
-                    "council",
-                    "meeting",
-                    "hearing",
-                    "bylaw",
-                    "form",
-                    "policy",
-                    "guide",
-                    "map",
-                    "contact",
-                ]
-            ):
-                continue
-
             full_url = urllib.parse.urljoin(url, href)
-            if full_url.lower().endswith(".pdf"):
-                snippet = extract_pdf_snippet(full_url)
-            else:
-                snippet = "📄 <i>Официальное объявление муниципалитета Gibsons.</i>"
 
-            notify_job(
-                "Town of Gibsons", title, full_url, snippet, seen, new_seen
-            )
+            if not (full_url.lower().endswith(".pdf") or "/careers/" in full_url.lower()):
+                continue
+
+            skip_docs = ["application", "volunteer", "guide", "form", "policy", "benefit", "handbook", "agreement"]
+            if any(skip in title.lower() or skip in href.lower() for skip in skip_docs):
+                continue
+
+            junk_anchors = ["click here", "learn more", "download", "pdf", "view", "link"]
+            if len(title) < 5 or any(j in title.lower() for j in junk_anchors):
+                prev_h = a.find_previous(["h3", "h4", "h5", "p", "strong"])
+                if prev_h and len(prev_h.get_text(strip=True)) > 5:
+                    title = prev_h.get_text(strip=True)
+                else:
+                    continue
+
+            snippet = extract_pdf_snippet(full_url)
+            if not snippet:
+                continue
+
+            notify_job("Town of Gibsons", title, full_url, snippet, seen, new_seen)
     except Exception as e:
         print(f"Ошибка Gibsons: {e}")
 
 
 def parse_civicjobs_rss(seen, new_seen):
-    """Парсинг через стабильный официальный RSS-поток CivicJobs BC."""
+    """Парсер официального RSS-потока CivicJobs BC."""
     url = "https://www.civicjobs.ca/rss"
     try:
         feed = feedparser.parse(url)
@@ -257,7 +260,6 @@ def parse_civicjobs_rss(seen, new_seen):
             summary = entry.get("summary", "")
             full_text = f"{title} {summary}"
 
-            # Фильтруем позиции только для нашего региона
             if any(
                 loc in full_text.lower()
                 for loc in [
@@ -294,13 +296,9 @@ def parse_sd46(seen, new_seen):
             title = entry.get("title", "").strip()
             link = entry.get("link", "").strip()
             summary = clean_meaningful_text(
-                BeautifulSoup(
-                    entry.get("summary", ""), "html.parser"
-                ).get_text()
+                BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()
             )
-            notify_job(
-                "SD46 (School District)", title, link, summary, seen, new_seen
-            )
+            notify_job("SD46 (School District)", title, link, summary, seen, new_seen)
     except Exception as e:
         print(f"Ошибка SD46: {e}")
 
