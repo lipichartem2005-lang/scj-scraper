@@ -21,6 +21,7 @@ SESSION.headers.update({
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     ),
+    "Accept-Language": "en-CA,en-US;q=0.9,en;q=0.8",
 })
 
 
@@ -40,7 +41,7 @@ def send_telegram(text):
         if r.status_code != 200:
             print(f"[-] Telegram API Error ({r.status_code}): {r.text}")
     except Exception as e:
-        print(f"[-] Сетевой сбой при отправке в Telegram: {e}")
+        print(f"[-] Сетевой сбой Telegram: {e}")
 
 
 def extract_wage(text):
@@ -105,7 +106,7 @@ def clean_text(text, max_len=350):
 
 def extract_pdf(url):
     try:
-        r = SESSION.get(url, timeout=8)
+        r = SESSION.get(url, timeout=10)
         if r.status_code == 200:
             reader = PdfReader(io.BytesIO(r.content))
             txt = ""
@@ -163,7 +164,7 @@ def parse_scrd(seen, new_seen):
     url = "https://www.scrd.ca/careers/"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=10)
+        r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
             return "ошибка сети", sent
         soup = BeautifulSoup(r.text, "html.parser")
@@ -198,7 +199,7 @@ def parse_gibsons(seen, new_seen):
     url = "https://gibsons.ca/town-hall/employment-opportunities/"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=10)
+        r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
             return "ошибка сети", sent
         soup = BeautifulSoup(r.text, "html.parser")
@@ -217,7 +218,7 @@ def parse_gibsons(seen, new_seen):
                 for s in ["form", "policy", "benefit", "handbook", "guide"]
             ):
                 continue
-            full_url = urllib.parse.urljoin(url, href)
+            full_url = urllib.parse.urljoin("https://gibsons.ca", href)
             desc = extract_pdf(full_url)
             if desc and notify(
                 "Town of Gibsons", title, full_url, desc, seen, new_seen
@@ -232,22 +233,71 @@ def parse_sechelt(seen, new_seen):
     url = "https://www.sechelt.ca/en/town-hall/employment.aspx"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=10)
+        r = SESSION.get(
+            url, timeout=15, headers={"Referer": "https://www.google.com/"}
+        )
         if r.status_code != 200:
             return "ошибка сети", sent
         soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.select("a[href*='.pdf']"):
+        links = soup.select(
+            "main a, #maincontent a, .content a, a[href*='.pdf']"
+        )
+        for a in links:
             href = a.get("href", "")
             title = a.get_text(strip=True)
-            if len(title) < 5 or any(
-                s in title.lower() for s in ["bylaw", "benefit", "form"]
+            if not href or len(title) < 5:
+                continue
+            if any(
+                s in title.lower()
+                for s in ["bylaw", "benefit", "form", "handbook", "policy"]
             ):
                 continue
+
             full_url = urllib.parse.urljoin(url, href)
-            desc = extract_pdf(full_url)
-            if desc and notify(
-                "District of Sechelt", title, full_url, desc, seen, new_seen
-            ):
+            if full_url.lower().endswith(".pdf"):
+                desc = extract_pdf(full_url)
+                if desc and notify(
+                    "District of Sechelt",
+                    title,
+                    full_url,
+                    desc,
+                    seen,
+                    new_seen,
+                ):
+                    sent += 1
+        return "успешно", sent
+    except Exception as e:
+        return f"ошибка ({e})", 0
+
+
+def parse_bc_ferries(seen, new_seen):
+    """Парсер BC Ferries: прямой поиск вакансий терминала Langdale / Sunshine Coast."""
+    url = "https://careers.bcferries.com/search/?q=Langdale&locationsearch=Sunshine+Coast"
+    sent = 0
+    try:
+        r = SESSION.get(url, timeout=15)
+        if r.status_code != 200:
+            return "ошибка сети", sent
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select("tr.data-row, .job-tile, .searchResults tr")
+        for row in rows:
+            link_el = row.find("a", href=re.compile(r"/job/"))
+            if not link_el:
+                continue
+            title = link_el.get_text(strip=True)
+            link = urllib.parse.urljoin(
+                "https://careers.bcferries.com", link_el.get("href")
+            )
+            row_text = row.get_text(separator=" ", strip=True)
+
+            wage = extract_wage(row_text)
+            wage_line = f"💰 <b>Ставка:</b> {wage}\n\n" if wage else ""
+            desc = (
+                f"{wage_line}Официальная вакансия терминала Langdale / BC"
+                " Ferries (BCFMWU)."
+            )
+
+            if notify("BC Ferries", title, link, desc, seen, new_seen):
                 sent += 1
         return "успешно", sent
     except Exception as e:
@@ -258,14 +308,15 @@ def parse_bc_liquor(seen, new_seen):
     url = "https://bcliquorstores.prevueaps.ca/jobs/"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=10)
+        r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
             return "ошибка сети", sent
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.select("a[href*='/jobs/']"):
             txt = a.get_text(separator=" ", strip=True)
             if any(
-                l in txt.lower() for l in ["gibsons", "sechelt", "sunshine coast"]
+                l in txt.lower()
+                for l in ["gibsons", "sechelt", "sunshine coast"]
             ):
                 link = urllib.parse.urljoin(
                     "https://bcliquorstores.prevueaps.ca", a.get("href")
@@ -286,16 +337,13 @@ def parse_bc_liquor(seen, new_seen):
 
 
 def parse_ywca(seen, new_seen):
-    """Парсер карьерного портала YWCA (Metro Vancouver / Sunshine Coast)."""
     url = "https://ywcabc.org/careers"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=10)
+        r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
             return "ошибка сети", sent
         soup = BeautifulSoup(r.text, "html.parser")
-
-        # Ищем карточки и строки вакансий
         for a in soup.select("a[href*='/careers/'], a[href*='/job']"):
             title = a.get_text(strip=True)
             href = a.get("href", "")
@@ -304,16 +352,12 @@ def parse_ywca(seen, new_seen):
                 for w in ["learn more", "apply", "view all", "contact", "about"]
             ):
                 continue
-
             full_link = urllib.parse.urljoin(url, href)
-            # Извлекаем краткий сниппет из родительского блока
             parent_text = (
                 a.find_parent("div").get_text(separator=" ", strip=True)
                 if a.find_parent("div")
                 else ""
             )
-
-            # Проверяем привязку к Sunshine Coast, если указано
             is_sc = any(
                 w in parent_text.lower()
                 for w in [
@@ -326,7 +370,6 @@ def parse_ywca(seen, new_seen):
             prefix_info = (
                 "📍 <i>Sunshine Coast / Regional</i>\n" if is_sc else ""
             )
-
             wage = extract_wage(parent_text)
             wage_line = f"💰 <b>Ставка:</b> {wage}\n\n" if wage else ""
             desc = clean_text(parent_text) or "Карьерная позиция в сети YWCA."
@@ -349,10 +392,11 @@ def parse_civicjobs(seen, new_seen):
     url = "https://www.civicjobs.ca/rss"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=10)
-        if r.status_code != 200:
-            return "ошибка сети", sent
-        feed = feedparser.parse(r.content)
+        feed = feedparser.parse(url)
+        if feed.bozo and not feed.entries:
+            r = SESSION.get(url, timeout=12)
+            feed = feedparser.parse(r.text)
+
         for e in feed.entries:
             t = e.get("title", "")
             s = e.get("summary", "")
@@ -387,19 +431,21 @@ def parse_sd46(seen, new_seen):
     url = "https://www.makeafuture.ca/bc-schools-and-districts/sunshine-coast-school-district-no-46/feed/"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=10)
-        if r.status_code != 200:
-            return "ошибка сети", sent
-        feed = feedparser.parse(r.content)
-        for e in feed.entries:
-            t = e.get("title", "")
-            link = e.get("link", "")
-            desc = clean_text(
-                BeautifulSoup(e.get("summary", ""), "html.parser").get_text()
-            )
-            if notify("SD46 (School District)", t, link, desc, seen, new_seen):
-                sent += 1
-        return "успешно", sent
+        r = SESSION.get(url, timeout=15)
+        if r.status_code == 200:
+            feed = feedparser.parse(r.text)
+            for e in feed.entries:
+                t = e.get("title", "")
+                link = e.get("link", "")
+                desc = clean_text(
+                    BeautifulSoup(e.get("summary", ""), "html.parser").get_text()
+                )
+                if notify(
+                    "SD46 (School District)", t, link, desc, seen, new_seen
+                ):
+                    sent += 1
+            return "успешно", sent
+        return "ошибка сети", 0
     except Exception as e:
         return f"ошибка ({e})", 0
 
@@ -412,6 +458,7 @@ def main():
         ("SCRD (Regional District)", parse_scrd),
         ("Town of Gibsons", parse_gibsons),
         ("District of Sechelt", parse_sechelt),
+        ("BC Ferries", parse_bc_ferries),
         ("BC Liquor Stores", parse_bc_liquor),
         ("YWCA Careers", parse_ywca),
         ("CivicJobs BC", parse_civicjobs),
@@ -432,7 +479,6 @@ def main():
     finally:
         save_seen(new_seen)
 
-        # Формирование и отправка итогового отчета
         status_header = (
             f"🔔 <b>Отчет проверки вакансий</b>\n"
             f"Всего новых за цикл: <b>{total_new}</b>\n\n"
