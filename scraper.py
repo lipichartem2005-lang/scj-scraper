@@ -7,21 +7,40 @@ from bs4 import BeautifulSoup
 import feedparser
 from pypdf import PdfReader
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CACHE_FILE = "seen_jobs.json"
 
+# Создаем устойчивую сессию с автоматическими повторами и браузерными заголовками
 SESSION = requests.Session()
+retries = Retry(
+    total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504]
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=retries))
+SESSION.mount("http://", HTTPAdapter(max_retries=retries))
+
 SESSION.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
         " like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
     ),
-    "Accept-Language": "en-CA,en-US;q=0.9,en;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Ch-Ua": (
+        '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'
+    ),
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 })
 
 
@@ -166,7 +185,7 @@ def parse_scrd(seen, new_seen):
     try:
         r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
-            return "ошибка сети", sent
+            return f"статус {r.status_code}", sent
         soup = BeautifulSoup(r.text, "html.parser")
         for h in soup.find_all(re.compile(r"h[2-5]")):
             title = h.get_text(strip=True)
@@ -201,7 +220,7 @@ def parse_gibsons(seen, new_seen):
     try:
         r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
-            return "ошибка сети", sent
+            return f"статус {r.status_code}", sent
         soup = BeautifulSoup(r.text, "html.parser")
         opps = soup.find(
             lambda t: t.name in ["h2", "h3", "h4"]
@@ -234,10 +253,20 @@ def parse_sechelt(seen, new_seen):
     sent = 0
     try:
         r = SESSION.get(
-            url, timeout=15, headers={"Referer": "https://www.google.com/"}
+            url,
+            timeout=15,
+            headers={
+                "Referer": "https://www.sechelt.ca/",
+                "Sec-Fetch-Site": "same-origin",
+            },
         )
         if r.status_code != 200:
-            return "ошибка сети", sent
+            # Если прямой запрос вернул ошибку, пробуем корень сайта
+            r = SESSION.get("https://www.sechelt.ca/", timeout=10)
+            r = SESSION.get(url, timeout=15)
+            if r.status_code != 200:
+                return f"статус {r.status_code}", sent
+
         soup = BeautifulSoup(r.text, "html.parser")
         links = soup.select(
             "main a, #maincontent a, .content a, a[href*='.pdf']"
@@ -267,17 +296,22 @@ def parse_sechelt(seen, new_seen):
                     sent += 1
         return "успешно", sent
     except Exception as e:
-        return f"ошибка ({e})", 0
+        print(f"[-] Sechelt error: {e}")
+        return f"ошибка ({e.__class__.__name__})", 0
 
 
 def parse_bc_ferries(seen, new_seen):
-    """Парсер BC Ferries: прямой поиск вакансий терминала Langdale / Sunshine Coast."""
-    url = "https://careers.bcferries.com/search/?q=Langdale&locationsearch=Sunshine+Coast"
+    """BC Ferries: инициализируем сессию и получаем вакансии терминала Langdale."""
+    search_url = "https://careers.bcferries.com/search/?q=Langdale&locationsearch=Sunshine+Coast"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=15)
+        # 1. Заходим на главную карьеру для получения cookie
+        SESSION.get("https://careers.bcferries.com/", timeout=10)
+        # 2. Выполняем поиск
+        r = SESSION.get(search_url, timeout=15)
         if r.status_code != 200:
-            return "ошибка сети", sent
+            return f"статус {r.status_code}", sent
+
         soup = BeautifulSoup(r.text, "html.parser")
         rows = soup.select("tr.data-row, .job-tile, .searchResults tr")
         for row in rows:
@@ -301,7 +335,8 @@ def parse_bc_ferries(seen, new_seen):
                 sent += 1
         return "успешно", sent
     except Exception as e:
-        return f"ошибка ({e})", 0
+        print(f"[-] BC Ferries error: {e}")
+        return f"ошибка ({e.__class__.__name__})", 0
 
 
 def parse_bc_liquor(seen, new_seen):
@@ -310,7 +345,7 @@ def parse_bc_liquor(seen, new_seen):
     try:
         r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
-            return "ошибка сети", sent
+            return f"статус {r.status_code}", sent
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.select("a[href*='/jobs/']"):
             txt = a.get_text(separator=" ", strip=True)
@@ -342,7 +377,7 @@ def parse_ywca(seen, new_seen):
     try:
         r = SESSION.get(url, timeout=12)
         if r.status_code != 200:
-            return "ошибка сети", sent
+            return f"статус {r.status_code}", sent
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.select("a[href*='/careers/'], a[href*='/job']"):
             title = a.get_text(strip=True)
@@ -392,10 +427,11 @@ def parse_civicjobs(seen, new_seen):
     url = "https://www.civicjobs.ca/rss"
     sent = 0
     try:
-        feed = feedparser.parse(url)
-        if feed.bozo and not feed.entries:
-            r = SESSION.get(url, timeout=12)
+        r = SESSION.get(url, timeout=12)
+        if r.status_code == 200:
             feed = feedparser.parse(r.text)
+        else:
+            feed = feedparser.parse(url)
 
         for e in feed.entries:
             t = e.get("title", "")
@@ -428,26 +464,38 @@ def parse_civicjobs(seen, new_seen):
 
 
 def parse_sd46(seen, new_seen):
+    """SD46: загрузка официального RSS-потока школьного округа Саншайн-Коста."""
     url = "https://www.makeafuture.ca/bc-schools-and-districts/sunshine-coast-school-district-no-46/feed/"
     sent = 0
     try:
-        r = SESSION.get(url, timeout=15)
+        r = SESSION.get(
+            url,
+            timeout=15,
+            headers={
+                "Referer": (
+                    "https://www.makeafuture.ca/bc-schools-and-districts/sunshine-coast-school-district-no-46/"
+                )
+            },
+        )
         if r.status_code == 200:
             feed = feedparser.parse(r.text)
             for e in feed.entries:
                 t = e.get("title", "")
                 link = e.get("link", "")
                 desc = clean_text(
-                    BeautifulSoup(e.get("summary", ""), "html.parser").get_text()
+                    BeautifulSoup(
+                        e.get("summary", ""), "html.parser"
+                    ).get_text()
                 )
                 if notify(
                     "SD46 (School District)", t, link, desc, seen, new_seen
                 ):
                     sent += 1
             return "успешно", sent
-        return "ошибка сети", 0
+        return f"статус {r.status_code}", 0
     except Exception as e:
-        return f"ошибка ({e})", 0
+        print(f"[-] SD46 error: {e}")
+        return f"ошибка ({e.__class__.__name__})", 0
 
 
 def main():
