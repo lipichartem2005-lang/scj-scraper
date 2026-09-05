@@ -11,50 +11,44 @@ CACHE_FILE = "seen_jobs.json"
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-        " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
 }
 
-# 1. Сайты для обычного HTML-парсинга
 HTML_TARGETS = [
     {
         "name": "Town of Gibsons",
         "url": "https://gibsons.ca/town-hall/employment-opportunities/",
-        "selector": "a[href*='pdf'], .entry-content a",
+        "selector": "main a, article a, .entry-content a",
     },
     {
-        "name": "SCRD (Regional District)",
+        "name": "SCRD",
         "url": "https://www.scrd.ca/careers/",
-        "selector": "a[href*='career'], a[href*='job'], .entry-content a",
+        "selector": "main a, .entry-content a, a[href*='career']",
     },
     {
         "name": "District of Sechelt",
         "url": "https://www.sechelt.ca/en/town-hall/employment.aspx",
-        "selector": "a[href*='pdf'], .main-content a",
+        "selector": "main a, #maincontent a, .content a",
     },
 ]
 
-# 2. RSS-ленты (CivicJobs и MakeAFuture / SD46)
 RSS_TARGETS = [
     {
         "name": "CivicJobs BC (Sunshine Coast)",
-        "url": (
-            "https://www.civicjobs.ca/rss?region=Sunshine+Coast"
-        ),  # агрегатор всех муниципалитетов региона
+        "url": "https://www.civicjobs.ca/rss?region=Sunshine+Coast",
     },
     {
-        "name": "SD46 (School District 46)",
-        "url": (
-            "https://www.makeafuture.ca/bc-schools-and-districts/sunshine-coast-school-district-no-46/feed/"
-        ),
+        "name": "Indeed (Union - Sunshine Coast)",
+        "url": "https://ca.indeed.com/rss?q=union&l=Sunshine+Coast%2C+BC",
     },
 ]
 
 
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Ошибка: не заданы TELEGRAM_TOKEN или TELEGRAM_CHAT_ID")
+        print("ОШИБКА: Секреты TELEGRAM_TOKEN или CHAT_ID не найдены в ENV!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -64,9 +58,11 @@ def send_telegram(text):
         "disable_web_page_preview": True,
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"Telegram вернул ошибку {r.status_code}: {r.text}")
     except Exception as e:
-        print(f"Ошибка отправки сообщения: {e}")
+        print(f"Сбой сети Telegram: {e}")
 
 
 def load_seen():
@@ -85,92 +81,68 @@ def save_seen(seen):
 
 
 def process_item(source_name, title, link, seen, new_seen):
+    if not link or not title or len(title) < 4:
+        return
+    # Исключаем служебные ссылки сайтов
+    skip_words = [
+        "home",
+        "contact",
+        "privacy",
+        "facebook",
+        "twitter",
+        "instagram",
+        "youtube",
+        "menu",
+        "sitemap",
+    ]
+    if any(w in title.lower() for w in skip_words):
+        return
+
     job_id = f"{source_name}::{title}::{link}"
     if job_id not in seen:
         new_seen.add(job_id)
         msg = (
             f"⚡ <b>Новая вакансия: {source_name}</b>\n\n"
             f"📌 {title}\n"
-            f"🔗 <a href='{link}'>Открыть вакансию</a>"
+            f"🔗 <a href='{link}'>Открыть ссылку</a>"
         )
         send_telegram(msg)
-
-
-def scrape_html(seen, new_seen):
-    for target in HTML_TARGETS:
-        try:
-            resp = requests.get(target["url"], headers=HEADERS, timeout=15)
-            if resp.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for el in soup.select(target["selector"]):
-                title = el.get_text(strip=True)
-                raw_link = el.get("href", "")
-                if not title or len(title) < 5 or not raw_link:
-                    continue
-                if any(
-                    skip in title.lower()
-                    for skip in [
-                        "home",
-                        "contact",
-                        "privacy",
-                        "accessibility",
-                        "read more",
-                    ]
-                ):
-                    continue
-                full_link = urllib.parse.urljoin(target["url"], raw_link)
-                process_item(target["name"], title, full_link, seen, new_seen)
-        except Exception as e:
-            print(f"Ошибка HTML-парсинга {target['name']}: {e}")
-
-
-def scrape_rss(seen, new_seen):
-    for feed in RSS_TARGETS:
-        try:
-            parsed = feedparser.parse(feed["url"])
-            for entry in parsed.entries:
-                title = entry.get("title", "").strip()
-                link = entry.get("link", "").strip()
-                if title and link:
-                    process_item(feed["name"], title, link, seen, new_seen)
-        except Exception as e:
-            print(f"Ошибка RSS {feed['name']}: {e}")
-
-
-def scrape_vch(seen, new_seen):
-    # Vancouver Coastal Health: фильтр по Sechelt и Gibsons
-    url = "https://careers.vch.ca/api/jobs"
-    params = {"keywords": "Gibsons OR Sechelt", "sortBy": "relevance", "page": 1}
-    try:
-        resp = requests.get(
-            url,
-            params=params,
-            headers={**HEADERS, "Accept": "application/json"},
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            for job in data.get("jobs", []):
-                title = job.get("data", {}).get("title")
-                slug = job.get("data", {}).get("slug")
-                if title and slug:
-                    link = f"https://careers.vch.ca/jobs/{slug}"
-                    process_item(
-                        "VCH (Health Care)", title, link, seen, new_seen
-                    )
-    except Exception as e:
-        print(f"Ошибка VCH: {e}")
 
 
 def main():
     seen = load_seen()
     new_seen = set(seen)
 
-    scrape_html(seen, new_seen)
-    scrape_rss(seen, new_seen)
-    scrape_vch(seen, new_seen)
+    # Проверочный сигнал при первом старте (если база вакансий пустая)
+    if not seen:
+        send_telegram("🤖 Бот успешно запущен и начинает сбор вакансий...")
+
+    for target in HTML_TARGETS:
+        try:
+            resp = requests.get(target["url"], headers=HEADERS, timeout=15)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                links = soup.select(target["selector"])
+                for a in links:
+                    title = a.get_text(strip=True)
+                    href = a.get("href", "")
+                    if href and not href.startswith("mailto:"):
+                        full_url = urllib.parse.urljoin(target["url"], href)
+                        process_item(
+                            target["name"], title, full_url, seen, new_seen
+                        )
+        except Exception as e:
+            print(f"Ошибка сайта {target['name']}: {e}")
+
+    for feed in RSS_TARGETS:
+        try:
+            parsed = feedparser.parse(feed["url"])
+            for entry in parsed.entries:
+                title = entry.get("title", "").strip()
+                link = entry.get("link", "").strip()
+                process_item(feed["name"], title, link, seen, new_seen)
+        except Exception as e:
+            print(f"Ошибка ленты {feed['name']}: {e}")
 
     save_seen(new_seen)
 
