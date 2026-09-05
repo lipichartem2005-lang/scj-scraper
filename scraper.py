@@ -22,6 +22,7 @@ HEADERS = {
 
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("[-] Ошибка: TELEGRAM_TOKEN или CHAT_ID не настроены!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -31,13 +32,14 @@ def send_telegram(text):
         "disable_web_page_preview": True,
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"[-] Telegram API Error ({r.status_code}): {r.text}")
     except Exception as e:
-        print(f"Ошибка Telegram: {e}")
+        print(f"[-] Ошибка отправки Telegram: {e}")
 
 
 def extract_wage(text):
-    """Поиск ставки $/час или годового оклада."""
     hourly_explicit = re.search(
         r"(\$\s*\d{2}(?:\.\d{2})?\s*(?:per\s*hour|\/\s*hr|hourly))",
         text,
@@ -76,7 +78,6 @@ def extract_wage(text):
 
 
 def clean_meaningful_text(text, max_len=360):
-    """Удаляет промо-преамбулы туризма и оставляет суть."""
     patterns_to_remove = [
         r"The Sunshine Coast.*?Hike the trails.*?(attend|cross - country skiing|culture)[,\.]?",
         r"The Sunshine Coast A natural paradise.*?Skwxw[uú]7mesh.*?Nations?[,\.]?",
@@ -132,8 +133,8 @@ def extract_pdf_snippet(pdf_url):
             body = clean_meaningful_text(full_text)
             wage_line = f"💰 <b>Ставка:</b> {wage}\n\n" if wage else ""
             return f"{wage_line}{body}"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[-] Ошибка чтения PDF {pdf_url}: {e}")
     return None
 
 
@@ -141,24 +142,30 @@ def load_seen():
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
+                data = json.load(f)
+                print(f"[*] Загружено из кэша {CACHE_FILE}: {len(data)} вакансий")
+                return set(data)
+        except Exception as e:
+            print(f"[-] Ошибка загрузки кэша: {e}")
             return set()
+    print("[*] Файл кэша отсутствует. Будут отправлены все найденные вакансии.")
     return set()
 
 
 def save_seen(seen):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(seen)), f, ensure_ascii=False, indent=2)
+    print(f"[*] Сохранено в кэш: {len(seen)} вакансий")
 
 
 def notify_job(source, title, link, description, seen, new_seen):
     clean_title = re.sub(r"\s+", " ", title).strip()
     job_id = f"{source}::{clean_title}::{link}"
     if job_id in seen:
-        return
+        return False
 
     new_seen.add(job_id)
+    print(f"[+] ОТПРАВКА В TELEGRAM: [{source}] {clean_title}")
     msg = (
         f"⚡ <b>Новая вакансия: {source}</b>\n\n"
         f"📌 <b>{clean_title}</b>\n\n"
@@ -166,13 +173,13 @@ def notify_job(source, title, link, description, seen, new_seen):
         f"🔗 <a href='{link}'>Открыть вакансию</a>"
     )
     send_telegram(msg)
-
-
-# --- ПАРСЕРЫ МУНИЦИПАЛИТЕТОВ ---
+    return True
 
 
 def parse_scrd(seen, new_seen):
+    print("[*] Проверка SCRD...")
     url = "https://www.scrd.ca/careers/"
+    count = 0
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code != 200:
@@ -202,13 +209,17 @@ def parse_scrd(seen, new_seen):
                 pdf_link = urllib.parse.urljoin(url, link_tag.get("href"))
                 snippet = extract_pdf_snippet(pdf_link)
                 if snippet:
-                    notify_job("SCRD", title, pdf_link, snippet, seen, new_seen)
+                    if notify_job("SCRD", title, pdf_link, snippet, seen, new_seen):
+                        count += 1
     except Exception as e:
-        print(f"Ошибка SCRD: {e}")
+        print(f"[-] Ошибка SCRD: {e}")
+    print(f"[*] SCRD завершено. Новых отправлено: {count}")
 
 
 def parse_gibsons(seen, new_seen):
+    print("[*] Проверка Town of Gibsons...")
     url = "https://gibsons.ca/town-hall/employment-opportunities/"
+    count = 0
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code != 200:
@@ -225,20 +236,12 @@ def parse_gibsons(seen, new_seen):
             title = a.get_text(strip=True)
             full_url = urllib.parse.urljoin(url, href)
 
-            if not (
-                full_url.lower().endswith(".pdf")
-                or "/careers/" in full_url.lower()
-            ):
+            if not (full_url.lower().endswith(".pdf") or "/careers/" in full_url.lower()):
                 continue
-            if any(
-                s in title.lower() or s in href.lower()
-                for s in ["application", "volunteer", "guide", "form", "policy"]
-            ):
+            if any(s in title.lower() or s in href.lower() for s in ["application", "volunteer", "guide", "form", "policy"]):
                 continue
 
-            if len(title) < 5 or any(
-                j in title.lower() for j in ["click here", "pdf", "download"]
-            ):
+            if len(title) < 5 or any(j in title.lower() for j in ["click here", "pdf", "download"]):
                 prev_h = a.find_previous(["h3", "h4", "h5", "p", "strong"])
                 if prev_h and len(prev_h.get_text(strip=True)) > 5:
                     title = prev_h.get_text(strip=True)
@@ -247,15 +250,17 @@ def parse_gibsons(seen, new_seen):
 
             snippet = extract_pdf_snippet(full_url)
             if snippet:
-                notify_job(
-                    "Town of Gibsons", title, full_url, snippet, seen, new_seen
-                )
+                if notify_job("Town of Gibsons", title, full_url, snippet, seen, new_seen):
+                    count += 1
     except Exception as e:
-        print(f"Ошибка Gibsons: {e}")
+        print(f"[-] Ошибка Gibsons: {e}")
+    print(f"[*] Town of Gibsons завершено. Новых отправлено: {count}")
 
 
 def parse_sechelt(seen, new_seen):
+    print("[*] Проверка District of Sechelt...")
     url = "https://www.sechelt.ca/en/town-hall/employment.aspx"
+    count = 0
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code != 200:
@@ -266,32 +271,22 @@ def parse_sechelt(seen, new_seen):
             title = a.get_text(strip=True)
             if not href.lower().endswith(".pdf") or len(title) < 6:
                 continue
-            if any(
-                s in title.lower()
-                for s in ["form", "benefit", "bylaw", "handbook", "agreement"]
-            ):
+            if any(s in title.lower() for s in ["form", "benefit", "bylaw", "handbook", "agreement"]):
                 continue
             full_url = urllib.parse.urljoin(url, href)
             snippet = extract_pdf_snippet(full_url)
             if snippet:
-                notify_job(
-                    "District of Sechelt",
-                    title,
-                    full_url,
-                    snippet,
-                    seen,
-                    new_seen,
-                )
+                if notify_job("District of Sechelt", title, full_url, snippet, seen, new_seen):
+                    count += 1
     except Exception as e:
-        print(f"Ошибка Sechelt: {e}")
-
-
-# --- НОВЫЕ ПРОФСОЮЗНЫЕ РАБОТОДАТЕЛИ ---
+        print(f"[-] Ошибка Sechelt: {e}")
+    print(f"[*] District of Sechelt завершено. Новых отправлено: {count}")
 
 
 def parse_bc_liquor(seen, new_seen):
-    """BC Liquor Stores: поиск вакансий на Sunshine Coast (Gibsons, Sechelt)."""
+    print("[*] Проверка BC Liquor Stores...")
     url = "https://bcliquorstores.prevueaps.ca/jobs/"
+    count = 0
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code == 200:
@@ -299,32 +294,30 @@ def parse_bc_liquor(seen, new_seen):
             for a in soup.select("a[href*='/jobs/']"):
                 text = a.get_text(separator=" ", strip=True)
                 href = a.get("href", "")
-                if any(
-                    loc in text.lower()
-                    for loc in ["gibsons", "sechelt", "sunshine coast"]
-                ):
+                if any(loc in text.lower() for loc in ["gibsons", "sechelt", "sunshine coast"]):
                     link = urllib.parse.urljoin(url, href)
                     wage = extract_wage(text) or "$29.94/hr (BCGEU Grid)"
                     prefix = f"💰 <b>Ставка:</b> {wage}\n\n"
-                    notify_job(
+                    if notify_job(
                         "BC Liquor Stores (BCGEU)",
                         text,
                         link,
                         f"{prefix}Розничная должность в государственной сети BC Liquor Stores.",
                         seen,
                         new_seen,
-                    )
+                    ):
+                        count += 1
     except Exception as e:
-        print(f"Ошибка BC Liquor: {e}")
+        print(f"[-] Ошибка BC Liquor: {e}")
+    print(f"[*] BC Liquor завершено. Новых отправлено: {count}")
 
 
-def parse_organization_feed(
-    source_name, search_keyword, location_query, seen, new_seen
-):
-    """Универсальный парсер потоков по Саншайн-Косту (Canada Post, RainCity, SCACL, SCCSS, VCH)."""
+def parse_organization_feed(source_name, search_keyword, location_query, seen, new_seen):
+    print(f"[*] Проверка {source_name}...")
     encoded_k = urllib.parse.quote(search_keyword)
     encoded_l = urllib.parse.quote(location_query)
     feed_url = f"https://ca.indeed.com/rss?q={encoded_k}&l={encoded_l}"
+    count = 0
     try:
         feed = feedparser.parse(feed_url)
         for entry in feed.entries:
@@ -332,116 +325,70 @@ def parse_organization_feed(
             summary = entry.get("summary", "")
             link = entry.get("link", "")
             wage = extract_wage(summary)
-            desc = clean_meaningful_text(
-                BeautifulSoup(summary, "html.parser").get_text()
-            )
+            desc = clean_meaningful_text(BeautifulSoup(summary, "html.parser").get_text())
             prefix = f"💰 <b>Ставка:</b> {wage}\n\n" if wage else ""
-            notify_job(
-                source_name, title, link, f"{prefix}{desc}", seen, new_seen
-            )
+            if notify_job(source_name, title, link, f"{prefix}{desc}", seen, new_seen):
+                count += 1
     except Exception as e:
-        print(f"Ошибка {source_name}: {e}")
+        print(f"[-] Ошибка {source_name}: {e}")
+    print(f"[*] {source_name} завершено. Новых отправлено: {count}")
 
 
 def parse_civicjobs_rss(seen, new_seen):
+    print("[*] Проверка CivicJobs RSS...")
     url = "https://www.civicjobs.ca/rss"
+    count = 0
     try:
         feed = feedparser.parse(url)
         for entry in feed.entries:
             title = entry.get("title", "").strip()
             summary = entry.get("summary", "")
             full = f"{title} {summary}".lower()
-            if any(
-                loc in full
-                for loc in [
-                    "sunshine coast",
-                    "gibsons",
-                    "sechelt",
-                    "pender harbour",
-                ]
-            ):
+            if any(loc in full for loc in ["sunshine coast", "gibsons", "sechelt", "pender harbour"]):
                 link = entry.get("link", "").strip()
                 wage = extract_wage(summary)
-                clean_desc = clean_meaningful_text(
-                    BeautifulSoup(summary, "html.parser").get_text()
-                )
+                clean_desc = clean_meaningful_text(BeautifulSoup(summary, "html.parser").get_text())
                 wage_line = f"💰 <b>Ставка:</b> {wage}\n\n" if wage else ""
-                notify_job(
-                    "CivicJobs BC",
-                    title,
-                    link,
-                    f"{wage_line}{clean_desc}",
-                    seen,
-                    new_seen,
-                )
+                if notify_job("CivicJobs BC", title, link, f"{wage_line}{clean_desc}", seen, new_seen):
+                    count += 1
     except Exception as e:
-        print(f"Ошибка CivicJobs: {e}")
+        print(f"[-] Ошибка CivicJobs RSS: {e}")
+    print(f"[*] CivicJobs RSS завершено. Новых отправлено: {count}")
 
 
 def parse_sd46(seen, new_seen):
+    print("[*] Проверка SD46 (Make A Future)...")
     url = "https://www.makeafuture.ca/bc-schools-and-districts/sunshine-coast-school-district-no-46/feed/"
+    count = 0
     try:
         feed = feedparser.parse(url)
         for entry in feed.entries:
             title = entry.get("title", "").strip()
             link = entry.get("link", "").strip()
-            summary = clean_meaningful_text(
-                BeautifulSoup(
-                    entry.get("summary", ""), "html.parser"
-                ).get_text()
-            )
-            notify_job(
-                "SD46 (School District)", title, link, summary, seen, new_seen
-            )
+            summary = clean_meaningful_text(BeautifulSoup(entry.get("summary", ""), "html.parser").get_text())
+            if notify_job("SD46 (School District)", title, link, summary, seen, new_seen):
+                count += 1
     except Exception as e:
-        print(f"Ошибка SD46: {e}")
+        print(f"[-] Ошибка SD46: {e}")
+    print(f"[*] SD46 завершено. Новых отправлено: {count}")
 
 
 def main():
     seen = load_seen()
     new_seen = set(seen)
 
-    # Муниципалитеты
     parse_scrd(seen, new_seen)
     parse_gibsons(seen, new_seen)
     parse_sechelt(seen, new_seen)
-
-    # Государственные предприятия и службы
     parse_bc_liquor(seen, new_seen)
-    parse_organization_feed(
-        "Canada Post", "Canada Post", "Sunshine Coast, BC", seen, new_seen
-    )
-    parse_organization_feed(
-        "Vancouver Coastal Health",
-        "Vancouver Coastal Health",
-        "Sunshine Coast, BC",
-        seen,
-        new_seen,
-    )
-    parse_organization_feed(
-        "BC Ferries", "BC Ferries", "Sunshine Coast, BC", seen, new_seen
-    )
 
-    # Социальные службы и ассоциации
-    parse_organization_feed(
-        "RainCity Housing", "RainCity", "Sunshine Coast, BC", seen, new_seen
-    )
-    parse_organization_feed(
-        "SCACL",
-        "Sunshine Coast Association for Community Living",
-        "Sunshine Coast, BC",
-        seen,
-        new_seen,
-    )
-    parse_organization_feed(
-        "SCCSS",
-        "Sunshine Coast Community Services",
-        "Sunshine Coast, BC",
-        seen,
-        new_seen,
-    )
+    parse_organization_feed("Canada Post", "Canada Post", "Sunshine Coast, BC", seen, new_seen)
+    parse_organization_feed("Vancouver Coastal Health", "Vancouver Coastal Health", "Sunshine Coast, BC", seen, new_seen)
+    parse_organization_feed("BC Ferries", "BC Ferries", "Sunshine Coast, BC", seen, new_seen)
+    parse_organization_feed("RainCity Housing", "RainCity", "Sunshine Coast, BC", seen, new_seen)
+    parse_organization_feed("SCACL", "Sunshine Coast Association for Community Living", "Sunshine Coast, BC", seen, new_seen)
+    parse_organization_feed("SCCSS", "Sunshine Coast Community Services", "Sunshine Coast, BC", seen, new_seen)
 
-    # Агрегаторы образования и муниципалитетов
     parse_civicjobs_rss(seen, new_seen)
     parse_sd46(seen, new_seen)
 
