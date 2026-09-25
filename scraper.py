@@ -194,7 +194,7 @@ def parse_gibsons(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 3. District of Sechelt (исправлен URL и парсинг внутренней таблицы)
+# 3. District of Sechelt
 def parse_sechelt(seen, new_seen):
     url = "https://www.sechelt.ca/en/work-and-business/careers-with-sechelt.aspx"
     fallback_url = "https://www.sechelt.ca/en/town-hall/employment.aspx"
@@ -227,9 +227,8 @@ def parse_sechelt(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 4. BC Ferries (парсинг открытого поискового эндпоинта)
+# 4. BC Ferries
 def parse_bc_ferries(seen, new_seen):
-    # Прямой поисковый запрос без блокировок
     url = "https://careers.bcferries.com/search/?q=Langdale&locationsearch="
     total_found, sent = 0, 0
     try:
@@ -253,7 +252,7 @@ def parse_bc_ferries(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 5. BC Liquor Stores (сканирование портала вакансий)
+# 5. BC Liquor Stores
 def parse_bc_liquor(seen, new_seen):
     url = "https://bcliquorstores.prevueaps.ca/jobs/"
     total_found, sent = 0, 0
@@ -265,7 +264,6 @@ def parse_bc_liquor(seen, new_seen):
         for a in soup.select("a[href*='/jobs/']"):
             txt = a.get_text(separator=" ", strip=True)
             total_found += 1
-            # Если есть в нашем регионе — отправляем
             if any(l in txt.lower() for l in ["gibsons", "sechelt", "sunshine coast"]):
                 link = urllib.parse.urljoin(url, a.get("href"))
                 wage = extract_wage(txt) or "$29.94/hr (BCGEU)"
@@ -276,7 +274,7 @@ def parse_bc_liquor(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 6. YWCA (Metro Vancouver & Sunshine Coast)
+# 6. YWCA
 def parse_ywca(seen, new_seen):
     url = "https://ywcabc.org/careers"
     total_found, sent = 0, 0
@@ -285,7 +283,6 @@ def parse_ywca(seen, new_seen):
         if r.status_code != 200:
             return f"статус {r.status_code}", total_found, sent
         soup = BeautifulSoup(r.text, "html.parser")
-        # Парсим карточки и ссылки внутри карьерного раздела
         items = soup.select(".view-content .views-row, article, a[href*='careers']")
         for item in items:
             link_tag = item.find("a") if item.name != "a" else item
@@ -298,7 +295,6 @@ def parse_ywca(seen, new_seen):
             total_found += 1
             full_link = urllib.parse.urljoin(url, href)
             wage = extract_wage(item.get_text())
-            # Отбираем позиции для нашего региона или общие
             if any(l in item.get_text().lower() for l in ["sunshine coast", "sechelt", "gibsons", "transition house"]):
                 if notify("YWCA (Sunshine Coast)", title, full_link, wage, seen, new_seen):
                     sent += 1
@@ -328,10 +324,8 @@ def parse_civicjobs(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 8. SD46 School District (Make A Future API)
+# 8. SD46 School District
 def parse_sd46(seen, new_seen):
-    # Прямой эндпоинт MakeAFuture для SD46
-    url = "https://makeafuture.applytoeducation.com/JobSearch/JobSearchEngine.aspx?region=23&employer=140"
     fallback_url = "https://www.sd46.bc.ca/employment/"
     total_found, sent = 0, 0
     try:
@@ -353,6 +347,58 @@ def parse_sd46(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
+# 9. Humanoid AI (thehumanoid.ai)
+def parse_humanoid(seen, new_seen):
+    url = "https://thehumanoid.ai/careers/"
+    total_found, sent = 0, 0
+    try:
+        r = SESSION.get(url, timeout=15, verify=False)
+        if r.status_code != 200:
+            return f"статус {r.status_code}", total_found, sent
+        soup = BeautifulSoup(r.text, "html.parser")
+        # Поиск вакансий, ссылок на открытые позиции или карточек Lever/Greenhouse/Notion
+        job_links = soup.select("a[href*='/careers/'], a[href*='jobs.lever.co'], a[href*='boards.greenhouse.io'], .career-item a, .job-item a")
+        for a in job_links:
+            title = a.get_text(strip=True)
+            href = a.get("href", "")
+            if len(title) < 4 or any(w in title.lower() for w in ["back", "home", "contact", "apply now"]):
+                continue
+            total_found += 1
+            full_link = urllib.parse.urljoin(url, href)
+            wage = extract_wage(a.find_parent("div").get_text() if a.find_parent("div") else "")
+            if notify("Humanoid AI", title, full_link, wage, seen, new_seen):
+                sent += 1
+        return "успешно", total_found, sent
+    except Exception as e:
+        return f"ошибка ({e.__class__.__name__})", total_found, sent
+
+
+# 10. VIA Rail (Vancouver)
+def parse_viarail(seen, new_seen):
+    url = "https://careers.viarail.ca/search/?q=&locationsearch=Vancouver"
+    total_found, sent = 0, 0
+    try:
+        r = SESSION.get(url, timeout=15, verify=False)
+        if r.status_code != 200:
+            return f"статус {r.status_code}", total_found, sent
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select("tr.data-row, .job-tile, .searchResults tr")
+        for row in rows:
+            link_tag = row.find("a", href=re.compile(r"/job/"))
+            if not link_tag:
+                continue
+            title = link_tag.get_text(strip=True)
+            link = urllib.parse.urljoin("https://careers.viarail.ca", link_tag.get("href"))
+            total_found += 1
+            row_text = row.get_text(separator=" ", strip=True)
+            wage = extract_wage(row_text)
+            if notify("VIA Rail (Vancouver)", title, link, wage, seen, new_seen):
+                sent += 1
+        return "успешно", total_found, sent
+    except Exception as e:
+        return f"ошибка ({e.__class__.__name__})", total_found, sent
+
+
 def main():
     seen = load_seen()
     new_seen = set(seen)
@@ -366,6 +412,8 @@ def main():
         ("YWCA Careers", parse_ywca),
         ("CivicJobs BC", parse_civicjobs),
         ("SD46 School District", parse_sd46),
+        ("Humanoid AI", parse_humanoid),
+        ("VIA Rail (Vancouver)", parse_viarail),
     ]
 
     report_lines = []
