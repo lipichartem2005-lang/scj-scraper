@@ -90,7 +90,31 @@ def extract_wage(text):
     return None
 
 
-def get_pdf_wage(pdf_url):
+def clean_desc(text, max_len=240):
+    if not text:
+        return ""
+    patterns = [
+        r"The Sunshine Coast.*?Hike the trails.*?(attend|cross - country skiing|culture)[,\.]?",
+        r"The Sunshine Coast A natural paradise.*?Skwxw[uú]7mesh.*?Nations?[,\.]?",
+        r"Bordered by rugged mountains.*?Skwxw[uú]7mesh.*?Nations?[,\.]?",
+    ]
+    for p in patterns:
+        text = re.sub(p, "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    markers = ["The Opportunity", "Position Overview", "About the Role", "Job Summary", "Duties", "Key Responsibilities"]
+    for m in markers:
+        idx = text.find(m)
+        if idx != -1:
+            text = text[idx:]
+            break
+
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        text = text[:max_len].rsplit(" ", 1)[0] + "..."
+    return text
+
+
+def get_pdf_info(pdf_url):
     try:
         r = SESSION.get(pdf_url, timeout=10, verify=False)
         if r.status_code == 200:
@@ -98,10 +122,12 @@ def get_pdf_wage(pdf_url):
             full_text = ""
             for page in reader.pages[:2]:
                 full_text += " " + (page.extract_text() or "")
-            return extract_wage(full_text)
+            wage = extract_wage(full_text)
+            desc = clean_desc(full_text)
+            return wage, desc
     except Exception:
         pass
-    return None
+    return None, ""
 
 
 def load_seen():
@@ -122,7 +148,7 @@ def save_seen(seen):
         print(f"[-] Ошибка записи кэша: {e}")
 
 
-def notify(source, title, link, wage, seen, new_seen):
+def notify(source, title, link, wage, desc, seen, new_seen):
     clean_title = re.sub(r"\s+", " ", title).strip()
     clean_link = link.strip()
     job_id = f"{source}::{clean_title}::{clean_link}"
@@ -130,12 +156,14 @@ def notify(source, title, link, wage, seen, new_seen):
         return False
 
     new_seen.add(job_id)
-    wage_str = f"💰 <b>Ставка:</b> {wage}" if wage else "💰 <b>Ставка:</b> указана в объявлении"
+    wage_str = f"💰 <b>Ставка:</b> {wage}\n" if wage else "💰 <b>Ставка:</b> указана в объявлении\n"
+    desc_str = f"📝 <i>{desc}</i>\n\n" if desc else "\n"
 
     msg = (
         f"⚡ <b>Новая вакансия: {source}</b>\n\n"
         f"📌 <b>{clean_title}</b>\n"
-        f"{wage_str}\n\n"
+        f"{wage_str}"
+        f"{desc_str}"
         f"🔗 <a href='{clean_link}'>Открыть вакансию</a>"
     )
     send_telegram(msg)
@@ -158,8 +186,8 @@ def parse_scrd(seen, new_seen):
                 if a:
                     total_found += 1
                     pdf_url = urllib.parse.urljoin(url, a.get("href"))
-                    wage = get_pdf_wage(pdf_url)
-                    if notify("SCRD", title, pdf_url, wage, seen, new_seen):
+                    wage, desc = get_pdf_info(pdf_url)
+                    if notify("SCRD", title, pdf_url, wage, desc, seen, new_seen):
                         sent += 1
         return "успешно", total_found, sent
     except Exception as e:
@@ -186,8 +214,8 @@ def parse_gibsons(seen, new_seen):
                 continue
             total_found += 1
             full_url = urllib.parse.urljoin("https://gibsons.ca", href)
-            wage = get_pdf_wage(full_url)
-            if notify("Town of Gibsons", title, full_url, wage, seen, new_seen):
+            wage, desc = get_pdf_info(full_url)
+            if notify("Town of Gibsons", title, full_url, wage, desc, seen, new_seen):
                 sent += 1
         return "успешно", total_found, sent
     except Exception as e:
@@ -219,8 +247,8 @@ def parse_sechelt(seen, new_seen):
             full_url = urllib.parse.urljoin("https://www.sechelt.ca", href)
             if full_url.lower().endswith(".pdf") or "job" in full_url.lower():
                 total_found += 1
-                wage = get_pdf_wage(full_url) if full_url.lower().endswith(".pdf") else None
-                if notify("District of Sechelt", title, full_url, wage, seen, new_seen):
+                wage, desc = get_pdf_info(full_url) if full_url.lower().endswith(".pdf") else (None, "")
+                if notify("District of Sechelt", title, full_url, wage, desc, seen, new_seen):
                     sent += 1
         return "успешно", total_found, sent
     except Exception as e:
@@ -244,7 +272,8 @@ def parse_bc_ferries(seen, new_seen):
                     total_found += 1
                     row_txt = row.get_text(separator=" ", strip=True)
                     wage = extract_wage(row_txt)
-                    if notify("BC Ferries", title, link, wage, seen, new_seen):
+                    desc = clean_desc(row_txt)
+                    if notify("BC Ferries", title, link, wage, desc, seen, new_seen):
                         sent += 1
             return "успешно", total_found, sent
         return f"статус {r.status_code}", total_found, sent
@@ -267,7 +296,8 @@ def parse_bc_liquor(seen, new_seen):
             if any(l in txt.lower() for l in ["gibsons", "sechelt", "sunshine coast"]):
                 link = urllib.parse.urljoin(url, a.get("href"))
                 wage = extract_wage(txt) or "$29.94/hr (BCGEU)"
-                if notify("BC Liquor Stores", txt, link, wage, seen, new_seen):
+                desc = "Розничная должность в государственной сети BC Liquor Stores."
+                if notify("BC Liquor Stores", txt, link, wage, desc, seen, new_seen):
                     sent += 1
         return "успешно", total_found, sent
     except Exception as e:
@@ -295,8 +325,9 @@ def parse_ywca(seen, new_seen):
             total_found += 1
             full_link = urllib.parse.urljoin(url, href)
             wage = extract_wage(item.get_text())
+            desc = clean_desc(item.get_text())
             if any(l in item.get_text().lower() for l in ["sunshine coast", "sechelt", "gibsons", "transition house"]):
-                if notify("YWCA (Sunshine Coast)", title, full_link, wage, seen, new_seen):
+                if notify("YWCA (Sunshine Coast)", title, full_link, wage, desc, seen, new_seen):
                     sent += 1
         return "успешно", total_found, sent
     except Exception as e:
@@ -317,7 +348,8 @@ def parse_civicjobs(seen, new_seen):
             if any(l in f"{t} {s}".lower() for l in ["sunshine coast", "gibsons", "sechelt", "pender harbour"]):
                 link = e.get("link", "")
                 wage = extract_wage(s)
-                if notify("CivicJobs BC", t, link, wage, seen, new_seen):
+                desc = clean_desc(BeautifulSoup(s, "html.parser").get_text())
+                if notify("CivicJobs BC", t, link, wage, desc, seen, new_seen):
                     sent += 1
         return "успешно", total_found, sent
     except Exception as e:
@@ -339,7 +371,8 @@ def parse_sd46(seen, new_seen):
                     total_found += 1
                     full_link = urllib.parse.urljoin(fallback_url, href)
                     wage = extract_wage(title)
-                    if notify("SD46 School District", title, full_link, wage, seen, new_seen):
+                    desc = clean_desc(title)
+                    if notify("SD46 School District", title, full_link, wage, desc, seen, new_seen):
                         sent += 1
             return "успешно", total_found, sent
         return f"статус {r.status_code}", total_found, sent
@@ -347,7 +380,7 @@ def parse_sd46(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 9. Humanoid AI (thehumanoid.ai)
+# 9. Humanoid AI (исправленный точный парсер реальных карточек позиций)
 def parse_humanoid(seen, new_seen):
     url = "https://thehumanoid.ai/careers/"
     total_found, sent = 0, 0
@@ -356,18 +389,27 @@ def parse_humanoid(seen, new_seen):
         if r.status_code != 200:
             return f"статус {r.status_code}", total_found, sent
         soup = BeautifulSoup(r.text, "html.parser")
-        # Поиск вакансий, ссылок на открытые позиции или карточек Lever/Greenhouse/Notion
-        job_links = soup.select("a[href*='/careers/'], a[href*='jobs.lever.co'], a[href*='boards.greenhouse.io'], .career-item a, .job-item a")
-        for a in job_links:
+
+        # Отсекаем ссылки шапки меню, ищем фактические блоки/ссылки на позиции
+        elements = soup.select("main a, .jobs-list a, .roles-list a, section a, div[class*='career'] a, div[class*='job'] a")
+        for a in elements:
             title = a.get_text(strip=True)
             href = a.get("href", "")
-            if len(title) < 4 or any(w in title.lower() for w in ["back", "home", "contact", "apply now"]):
+
+            # Фильтруем общие навигационные ссылки
+            if not href or len(title) < 5 or any(w in title.lower() for w in ["careers", "home", "about", "contact", "apply now", "privacy"]):
                 continue
-            total_found += 1
-            full_link = urllib.parse.urljoin(url, href)
-            wage = extract_wage(a.find_parent("div").get_text() if a.find_parent("div") else "")
-            if notify("Humanoid AI", title, full_link, wage, seen, new_seen):
-                sent += 1
+
+            # Должность должна быть осмысленным названием роли
+            if any(role_kw in title.lower() for role_kw in ["engineer", "developer", "researcher", "lead", "scientist", "manager", "designer", "intern", "specialist"]):
+                total_found += 1
+                full_link = urllib.parse.urljoin(url, href)
+                parent_txt = a.find_parent(["div", "li", "section"]).get_text(separator=" ", strip=True) if a.find_parent(["div", "li", "section"]) else ""
+                wage = extract_wage(parent_txt)
+                desc = clean_desc(parent_txt) or "Открытая инженерная / R&D позиция в Humanoid AI."
+                if notify("Humanoid AI", title, full_link, wage, desc, seen, new_seen):
+                    sent += 1
+
         return "успешно", total_found, sent
     except Exception as e:
         return f"ошибка ({e.__class__.__name__})", total_found, sent
@@ -392,7 +434,8 @@ def parse_viarail(seen, new_seen):
             total_found += 1
             row_text = row.get_text(separator=" ", strip=True)
             wage = extract_wage(row_text)
-            if notify("VIA Rail (Vancouver)", title, link, wage, seen, new_seen):
+            desc = clean_desc(row_text) or "Вакансия железнодорожной сети VIA Rail (станция Vancouver)."
+            if notify("VIA Rail (Vancouver)", title, link, wage, desc, seen, new_seen):
                 sent += 1
         return "успешно", total_found, sent
     except Exception as e:
