@@ -380,7 +380,7 @@ def parse_sd46(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 9. Humanoid AI (исправленный точный парсер реальных карточек позиций)
+# 9. Humanoid AI (Точный парсер позиций, отсекающий навигацию и спам)
 def parse_humanoid(seen, new_seen):
     url = "https://thehumanoid.ai/careers/"
     total_found, sent = 0, 0
@@ -390,25 +390,51 @@ def parse_humanoid(seen, new_seen):
             return f"статус {r.status_code}", total_found, sent
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Отсекаем ссылки шапки меню, ищем фактические блоки/ссылки на позиции
-        elements = soup.select("main a, .jobs-list a, .roles-list a, section a, div[class*='career'] a, div[class*='job'] a")
-        for a in elements:
-            title = a.get_text(strip=True)
-            href = a.get("href", "")
+        # 1. Сначала ищем специализированные блоки вакансий/карточек
+        job_blocks = soup.find_all(lambda tag: tag.name in ["div", "li", "article", "tr"] and (
+            any(c in " ".join(tag.get("class", [])).lower() for c in ["job", "role", "position", "career-card", "opening"])
+        ))
 
-            # Фильтруем общие навигационные ссылки
-            if not href or len(title) < 5 or any(w in title.lower() for w in ["careers", "home", "about", "contact", "apply now", "privacy"]):
+        # 2. Если таких классов нет, ищем заголовки h2-h4 внутри контентной зоны
+        if not job_blocks:
+            job_blocks = soup.select("main h2, main h3, main h4, section h2, section h3, section h4")
+
+        stop_titles = {"careers", "home", "about", "contact", "apply now", "privacy", "terms", "overview", "benefits", "culture"}
+
+        for block in job_blocks:
+            # Ищем название роли
+            if block.name in ["h2", "h3", "h4"]:
+                title = block.get_text(strip=True)
+                link_el = block.find("a") or block.find_next("a", href=True)
+                container = block.parent
+            else:
+                title_el = block.find(["h2", "h3", "h4", "h5", "strong", "b"]) or block.find("a")
+                title = title_el.get_text(strip=True) if title_el else ""
+                link_el = block.find("a", href=True)
+                container = block
+
+            if not title or title.lower() in stop_titles or len(title) < 6:
                 continue
 
-            # Должность должна быть осмысленным названием роли
-            if any(role_kw in title.lower() for role_kw in ["engineer", "developer", "researcher", "lead", "scientist", "manager", "designer", "intern", "specialist"]):
-                total_found += 1
-                full_link = urllib.parse.urljoin(url, href)
-                parent_txt = a.find_parent(["div", "li", "section"]).get_text(separator=" ", strip=True) if a.find_parent(["div", "li", "section"]) else ""
-                wage = extract_wage(parent_txt)
-                desc = clean_desc(parent_txt) or "Открытая инженерная / R&D позиция в Humanoid AI."
-                if notify("Humanoid AI", title, full_link, wage, desc, seen, new_seen):
-                    sent += 1
+            # Должность должна быть реальной позицией
+            is_job = any(w in title.lower() for w in [
+                "engineer", "developer", "research", "scientist", "lead", "architect", 
+                "manager", "intern", "robotics", "hardware", "software", "ai", "technician", "specialist"
+            ])
+            if not is_job:
+                continue
+
+            link = urllib.parse.urljoin(url, link_el.get("href")) if link_el else url
+            block_text = container.get_text(separator=" ", strip=True)
+            wage = extract_wage(block_text)
+
+            # Берем текст описания без повтора заголовка
+            desc_text = block_text.replace(title, "").strip()
+            desc = clean_desc(desc_text) or "Открытая инженерная / R&D позиция в Humanoid AI."
+
+            total_found += 1
+            if notify("Humanoid AI", title, link, wage, desc, seen, new_seen):
+                sent += 1
 
         return "успешно", total_found, sent
     except Exception as e:
@@ -425,18 +451,33 @@ def parse_viarail(seen, new_seen):
             return f"статус {r.status_code}", total_found, sent
         soup = BeautifulSoup(r.text, "html.parser")
         rows = soup.select("tr.data-row, .job-tile, .searchResults tr")
+
         for row in rows:
             link_tag = row.find("a", href=re.compile(r"/job/"))
             if not link_tag:
                 continue
+
+            row_text = row.get_text(separator=" ", strip=True)
+            row_lower = row_text.lower()
+
+            is_vancouver = (
+                "vancouver" in row_lower
+                or "pacific central" in row_lower
+                or (", bc" in row_lower and "british columbia" in row_lower)
+            )
+
+            if not is_vancouver:
+                continue
+
+            total_found += 1
             title = link_tag.get_text(strip=True)
             link = urllib.parse.urljoin("https://careers.viarail.ca", link_tag.get("href"))
-            total_found += 1
-            row_text = row.get_text(separator=" ", strip=True)
             wage = extract_wage(row_text)
-            desc = clean_desc(row_text) or "Вакансия железнодорожной сети VIA Rail (станция Vancouver)."
+            desc = clean_desc(row_text) or "Вакансия железнодорожной станции Vancouver (Pacific Central)."
+
             if notify("VIA Rail (Vancouver)", title, link, wage, desc, seen, new_seen):
                 sent += 1
+
         return "успешно", total_found, sent
     except Exception as e:
         return f"ошибка ({e.__class__.__name__})", total_found, sent
