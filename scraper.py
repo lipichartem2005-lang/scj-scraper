@@ -380,7 +380,7 @@ def parse_sd46(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 9. Humanoid AI (Точный парсер позиций, отсекающий навигацию и спам)
+# 9. Humanoid AI (СТРОГИЙ ФИЛЬТР: ТОЛЬКО VANCOUVER / BC / CANADA)
 def parse_humanoid(seen, new_seen):
     url = "https://thehumanoid.ai/careers/"
     total_found, sent = 0, 0
@@ -390,50 +390,52 @@ def parse_humanoid(seen, new_seen):
             return f"статус {r.status_code}", total_found, sent
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # 1. Сначала ищем специализированные блоки вакансий/карточек
         job_blocks = soup.find_all(lambda tag: tag.name in ["div", "li", "article", "tr"] and (
             any(c in " ".join(tag.get("class", [])).lower() for c in ["job", "role", "position", "career-card", "opening"])
         ))
 
-        # 2. Если таких классов нет, ищем заголовки h2-h4 внутри контентной зоны
         if not job_blocks:
             job_blocks = soup.select("main h2, main h3, main h4, section h2, section h3, section h4")
 
-        stop_titles = {"careers", "home", "about", "contact", "apply now", "privacy", "terms", "overview", "benefits", "culture"}
+        stop_titles = {"careers", "home", "about", "contact", "apply now", "privacy", "terms", "overview"}
 
         for block in job_blocks:
-            # Ищем название роли
             if block.name in ["h2", "h3", "h4"]:
-                title = block.get_text(strip=True)
+                raw_title = block.get_text(separator=" ", strip=True)
                 link_el = block.find("a") or block.find_next("a", href=True)
                 container = block.parent
             else:
                 title_el = block.find(["h2", "h3", "h4", "h5", "strong", "b"]) or block.find("a")
-                title = title_el.get_text(strip=True) if title_el else ""
+                raw_title = title_el.get_text(separator=" ", strip=True) if title_el else ""
                 link_el = block.find("a", href=True)
                 container = block
 
-            if not title or title.lower() in stop_titles or len(title) < 6:
+            # Очищаем название роли от меток времени и локаций
+            clean_title = re.sub(r"(UK|London|Full time|Part time|On-site|Remote|Hybrid)", "", raw_title, flags=re.I).strip()
+            clean_title = re.sub(r"\s+", " ", clean_title)
+
+            if not clean_title or clean_title.lower() in stop_titles or len(clean_title) < 5:
                 continue
 
-            # Должность должна быть реальной позицией
-            is_job = any(w in title.lower() for w in [
-                "engineer", "developer", "research", "scientist", "lead", "architect", 
-                "manager", "intern", "robotics", "hardware", "software", "ai", "technician", "specialist"
-            ])
-            if not is_job:
+            block_text = container.get_text(separator=" ", strip=True).lower()
+
+            # СТРОГАЯ ФИЛЬТРАЦИЯ ПО ГОРОДУ: только Vancouver или BC
+            # Исключаем явный London / UK
+            if "london" in block_text or "uk" in block_text:
+                if "vancouver" not in block_text and "british columbia" not in block_text:
+                    continue
+
+            is_vancouver_job = any(loc in block_text for loc in ["vancouver", "bc, canada", "british columbia"])
+            if not is_vancouver_job:
                 continue
-
-            link = urllib.parse.urljoin(url, link_el.get("href")) if link_el else url
-            block_text = container.get_text(separator=" ", strip=True)
-            wage = extract_wage(block_text)
-
-            # Берем текст описания без повтора заголовка
-            desc_text = block_text.replace(title, "").strip()
-            desc = clean_desc(desc_text) or "Открытая инженерная / R&D позиция в Humanoid AI."
 
             total_found += 1
-            if notify("Humanoid AI", title, link, wage, desc, seen, new_seen):
+            link = urllib.parse.urljoin(url, link_el.get("href")) if link_el else url
+            wage = extract_wage(block_text)
+            desc_text = block_text.replace(clean_title.lower(), "").strip()
+            desc = clean_desc(desc_text) or "Инженерная позиция Humanoid AI (локация: Vancouver)."
+
+            if notify("Humanoid AI (Vancouver)", clean_title, link, wage, desc, seen, new_seen):
                 sent += 1
 
         return "успешно", total_found, sent
@@ -496,7 +498,7 @@ def main():
         ("YWCA Careers", parse_ywca),
         ("CivicJobs BC", parse_civicjobs),
         ("SD46 School District", parse_sd46),
-        ("Humanoid AI", parse_humanoid),
+        ("Humanoid AI (Vancouver)", parse_humanoid),
         ("VIA Rail (Vancouver)", parse_viarail),
     ]
 
