@@ -380,7 +380,7 @@ def parse_sd46(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
-# 9. Humanoid AI (СТРОГИЙ ФИЛЬТР: ТОЛЬКО VANCOUVER / BC / CANADA)
+# 9. Humanoid AI (Vancouver)
 def parse_humanoid(seen, new_seen):
     url = "https://thehumanoid.ai/careers/"
     total_found, sent = 0, 0
@@ -410,7 +410,6 @@ def parse_humanoid(seen, new_seen):
                 link_el = block.find("a", href=True)
                 container = block
 
-            # Очищаем название роли от меток времени и локаций
             clean_title = re.sub(r"(UK|London|Full time|Part time|On-site|Remote|Hybrid)", "", raw_title, flags=re.I).strip()
             clean_title = re.sub(r"\s+", " ", clean_title)
 
@@ -419,8 +418,6 @@ def parse_humanoid(seen, new_seen):
 
             block_text = container.get_text(separator=" ", strip=True).lower()
 
-            # СТРОГАЯ ФИЛЬТРАЦИЯ ПО ГОРОДУ: только Vancouver или BC
-            # Исключаем явный London / UK
             if "london" in block_text or "uk" in block_text:
                 if "vancouver" not in block_text and "british columbia" not in block_text:
                     continue
@@ -485,6 +482,62 @@ def parse_viarail(seen, new_seen):
         return f"ошибка ({e.__class__.__name__})", total_found, sent
 
 
+# 11. EA Vancouver (Electronic Arts - Regular)
+def parse_ea_vancouver(seen, new_seen):
+    # Поиск по студии EA Vancouver с фильтром Regular positions
+    url = (
+        "https://jobs.ea.com/en_US/careers/Home/Vancouver/"
+        "?4537=%5B8691%5D&4537_format=3020&4538=%5B8382%5D&4538_format=3021"
+        "&listFilterMode=1&jobRecordsPerPage=20&jobOffset=0"
+    )
+    total_found, sent = 0, 0
+    try:
+        r = SESSION.get(url, timeout=15, verify=False)
+        if r.status_code != 200:
+            return f"статус {r.status_code}", total_found, sent
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Ищем карточки вакансий в верстке EA Careers
+        job_cards = soup.select(
+            ".job-item, .job-tile, .direct_finds_result_item, tr.data-row, "
+            "div[data-job-id], a[href*='/careers/JobDetail/']"
+        )
+
+        # Если специфичные классы не нашлись, берем прямые ссылки на JobDetail
+        if not job_cards:
+            job_cards = soup.find_all("a", href=re.compile(r"/JobDetail/|/job/", re.I))
+
+        for item in job_cards:
+            if item.name == "a":
+                link_el = item
+                container = item.find_parent(["div", "li", "tr"]) or item
+            else:
+                link_el = item.find("a", href=True)
+                container = item
+
+            if not link_el:
+                continue
+
+            title = link_el.get_text(strip=True)
+            href = link_el.get("href", "")
+            if len(title) < 5 or any(w in title.lower() for w in ["apply", "learn more", "careers", "home"]):
+                continue
+
+            full_link = urllib.parse.urljoin("https://jobs.ea.com", href)
+            card_text = container.get_text(separator=" ", strip=True)
+
+            total_found += 1
+            wage = extract_wage(card_text)
+            desc = clean_desc(card_text) or "Постоянная (Regular) позиция в EA Vancouver (Burnaby Studio)."
+
+            if notify("EA Vancouver", title, full_link, wage, desc, seen, new_seen):
+                sent += 1
+
+        return "успешно", total_found, sent
+    except Exception as e:
+        return f"ошибка ({e.__class__.__name__})", total_found, sent
+
+
 def main():
     seen = load_seen()
     new_seen = set(seen)
@@ -500,6 +553,7 @@ def main():
         ("SD46 School District", parse_sd46),
         ("Humanoid AI (Vancouver)", parse_humanoid),
         ("VIA Rail (Vancouver)", parse_viarail),
+        ("EA Vancouver (Regular)", parse_ea_vancouver),
     ]
 
     report_lines = []
